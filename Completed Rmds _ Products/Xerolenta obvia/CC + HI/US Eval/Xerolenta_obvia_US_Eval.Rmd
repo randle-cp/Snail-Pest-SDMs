@@ -1,0 +1,208 @@
+---
+title: "Evaluation for US Occurrences"
+author: "K. Hankins"
+date: '2022-09-23'
+output: html_document
+---
+
+## Front Matter
+The following script was developed cooperatively by the SHSU SDM working group, including Laura	Bianchi, Austin	Brenek, Jesus	Castillo, Nick 	Galle, Kayla	Hankins, Kenneth	Nobleza, Chris	Randle, Nico	Reger, Alyssa	Russell, Ava	Stendahl based on [tutorials](https://rspatial.org/) provided by Robert Hijmans and Jane Elith. Chris Randle composed the following script from many scripts developed by the SHSU SDM working group.
+
+# Libraries
+```{r Load-libraries}
+library(dismo)
+library(sp)
+library(raster)
+library(stats)
+library(dplyr)
+library(knitr)
+library(rgeos)
+library(maptools)
+library(rgdal)
+library(ecospat)
+library(usdm)
+library(mgcv)
+setwd("~/School/Thesis/Snail_Data")
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Genus and Species strings
+There are many places in this code where you will need to save files with filenames including the genus and species. We'll save these as strings to automate the creation of file names. Enter your genus name and specific epithet in the quotes below.
+```{r}
+genus<-"Xerolenta"
+species<-"obvia"
+```
+
+
+#NOTE: Begin by loading your saved workspace for your original models into your global environment. This will allow you to evaluate each of the models' predictive performances for those species with US occurrences without having to sort through the bulk of the code used to generate them. This template is solely dedicated to the evaluation of model predictive performance using novel data sourced from the species' invaded range.
+
+
+## Evaluation
+We want to generate AUC for each of our three models as well as the ensemble to further evaluate how well each model performed in predicting US occurrences (i.e., occurrences in the species' invaded range).  
+
+#Absence Testing Data
+First, we will need to read our new US occurrences data into R, convert it into a data frame, and create a subset of our occurrence data containing only lat/lon. Next, we will assign our new subset with a CRS before finally converting it into a spatial points data frame.
+
+```{r}
+#Copy and paste the file path for your US occurrence data down below to read it into R
+pres_test2<-read.csv('C:/Users/kscih/OneDrive/Documents/School/Thesis/Snail_Data/Xerolenta_obvia_US_Occurrences.csv')
+#Convert the data set into a data frame
+pres_test2<-data.frame(pres_test2)
+#Generate a subset of the data so that all columns that are not lat/lon are removed from the data set. The column numbers for lat/lon may vary slightly between species data sets. If subsetting the data as written results in two columns that are not lat/lon, change the column numbers for each accordingly. To determine the correct column number, open your data frame and locate the columns for lat/lon individually. Then, hover your cursor over each column's header, and wait for a small window to appear containing the appropriate column number.
+#pres_test2<-subset (pres_test2, select = c(98,105))
+
+#Next, we will assign our data with the same CRS as wrld_simpl
+data(wrld_simpl)
+coordinates(pres_test2) <- ~lon+lat
+crs(pres_test2) <- crs(wrld_simpl)
+
+#And convert it into a spatial points data frame
+pres_test2_SPDF<-SpatialPoints(pres_test2)
+```
+
+
+Next, we will use our pres_test2 data to generate our absence testing data, abs_test2. 
+```{r}
+#To ultimately sample our absences from the polygons surrounding our pres_test2 data, we must first re-calculate the mean distance between each of our US occurrence points.
+dist2<-spDists(pres_test2_SPDF,longlat = TRUE)
+#Replace all zeros with NAs...
+dist2[dist2 == 0]<-NA
+#And calculate the mean distance between points. However, because the resulting quantity will be calculated in kilometers, we must multiply this function by a factor of 1000 to convert this quantity into meters.
+dist2<-1000*mean(dist2, na.rm=TRUE)
+
+
+#Now we can draw circles around each of our test points...
+x <- circles(pres_test2_SPDF, d=dist2, lonlat=TRUE)
+#and convert them into polygons.
+pol <- polygons(x)
+#Next, we can draw a random sample of points from within each of our polygons. The number with which you multiply the length of your testing data (number of occurrence points) depends on how many absences remain once NAs are removed in the following chunks. If you are left with fewer absences than you are presences, come back to this line and increase the factor with which you multiply length(pres_test2) as necessary to give you 1:1 ratio of presences to absences. 
+samp2 <- spsample(pol, 10*length(pres_test2), type='random', iter=25)
+#Now, get the cell numbers from the raster stack (right to left, up to down)...
+cells <- cellFromXY(predictors, samp2)
+#and transform each of these to the center of its cell.
+abs_test2 <- xyFromCell(predictors, cells)
+#You'll get a warning saying that your CRS object has lost a comment. This is unimportant and can be ignored.
+```
+
+
+#GAM evaluation
+
+Now, we can actually begin evaluating each of our models' predictive performances for our withheld US occurrence data. Note: I kept all of our evaluation indices in this code, but we will only primarily be focused on the resulting AUC values for each.
+```{r}
+#First, we begin by extracting the corresponding numerical habitat suitability predictions for both of our presence and absence testing data.
+p<-extract(GAMpreds,pres_test2)
+a<-extract(GAMpreds,abs_test2)
+#Next, we will remove all NA values present in the data and shrink our number of absences,a, to match that of our presences, p. If n presences does not equal n absences, return to line 88 and increase the factor by which you multiply length(pres_test2) until you have enough absences to match your quantity of presences.
+p<-p[!is.na(p)]
+a<-a[!is.na(a)]
+a<-a[1:length(p)]
+#Now, we can weld it all together
+all_vals<-c(p,a)
+e<-evaluate(p=p,a=a)
+AUC_GAM<-e@auc
+COR_GAM<-e@cor
+pa<-c(replicate(length(p),1),replicate(length(a),0))
+kappaGAM<-ecospat.max.kappa(all_vals,pa)
+TSS_GAM<-ecospat.max.tss(all_vals,pa)
+print(paste('Max kappa: ', kappaGAM[2] ))
+print(paste('TSS:', TSS_GAM[[2]]))
+e
+```
+
+
+#ME Evaluation
+
+```{r}
+p<-extract(MEpreds,pres_test2)
+a<-extract(MEpreds,abs_test2)
+#Next, we will remove all NA values present in the data and shrink our number of absences,a, to match that of our presences, p. If n presences does not equal n absences, return to line 88 and increase the factor by which you multiply length(pres_test2) until you have enough absences to match your quantity of presences.
+p<-p[!is.na(p)]
+a<-a[!is.na(a)]
+a<-a[1:length(p)]
+#Now, we can weld it all together
+all_vals<-c(p,a)
+e<-evaluate(p=p,a=a)
+AUC_ME<-e@auc
+COR_ME<-e@cor
+pa<-c(replicate(length(p),1),replicate(length(a),0))
+kappaME<-ecospat.max.kappa(all_vals,pa)
+TSS_ME<-ecospat.max.tss(all_vals,pa)
+print(paste('Max kappa: ', kappaME[2] ))
+print(paste('TSS:', TSS_ME[[2]]))
+e
+```
+
+
+#BRT Evaluation
+
+```{r}
+p<-extract(BRTpreds,pres_test2)
+a<-extract(BRTpreds,abs_test2)
+#Next, we will remove all NA values present in the data and shrink our number of absences,a, to match that of our presences, p. If n presences does not equal n absences, return to line 88 and increase the factor by which you multiply length(pres_test2) until you have enough absences to match your quantity of presences.
+p<-p[!is.na(p)]
+a<-a[!is.na(a)]
+a<-a[1:length(p)]
+#Now, we can weld it all together
+all_vals<-c(p,a)
+e<-evaluate(p=p,a=a)
+AUC_BRT<-e@auc
+COR_BRT<-e@cor
+pa<-c(replicate(length(p),1),replicate(length(a),0))
+kappaBRT<-ecospat.max.kappa(all_vals,pa)
+TSS_BRT<-ecospat.max.tss(all_vals,pa)
+print(paste('Max kappa: ', kappaBRT[2] ))
+print(paste('TSS:', TSS_BRT[[2]]))
+e
+```
+
+
+#Ensemble Evaluation
+
+```{r}
+p<-extract(ENSpreds,pres_test2)
+a<-extract(ENSpreds,abs_test2)
+#Next, we will remove all NA values present in the data and shrink our number of absences,a, to match that of our presences, p. If n presences does not equal n absences, return to line 88 and increase the factor by which you multiply length(pres_test2) until you have enough absences to match your quantity of presences.
+p<-p[!is.na(p)]
+a<-a[!is.na(a)]
+a<-a[1:length(p)]
+#Now, we can weld it all together
+all_vals<-c(p,a)
+e<-evaluate(p=p,a=a)
+AUC_ENS<-e@auc
+COR_ENS<-e@cor
+pa<-c(replicate(length(p),1),replicate(length(a),0))
+kappaENS<-ecospat.max.kappa(all_vals,pa)
+TSS_ENS<-ecospat.max.tss(all_vals,pa)
+print(paste('Max kappa: ', kappaENS[2] ))
+print(paste('TSS:', TSS_ENS[[2]]))
+e
+```
+
+
+#Exporting the Data
+
+Now that we have generated evaluation metrics for each of our models, we can weld them together to create a comprehensive .csv containing our all of the results.
+```{r}
+#Let's go in this order of columns, left to right: AUC, COR, Kappa, TSS
+eGAM<-c(AUC_GAM,COR_GAM,kappaGAM[2], TSS_GAM[[2]])
+eME<-c(AUC_ME, COR_ME, kappaME[2],TSS_ME[[2]])
+eBRT<-c(AUC_BRT, COR_BRT, kappaBRT[2],TSS_BRT[[2]])
+eENS<-c(AUC_ENS, COR_ENS, kappaENS[2], TSS_ENS[[2]])
+all_evals<-rbind(eGAM,eME,eBRT,eENS)
+colnames(all_evals)<-c("AUC", "COR","MaxKappa","TSS")
+rownames(all_evals)<-c("GAM","MaxEnt", "BRT", "Ensemble")
+write.csv(all_evals, file=paste0(genus,"_",species, '_US_Eval.csv'))
+#Please upload your knitted markdown and results onto the projects' Google Drive.
+```
+
+
+
+
+
+
+

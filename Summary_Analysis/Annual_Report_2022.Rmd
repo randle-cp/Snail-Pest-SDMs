@@ -1,0 +1,238 @@
+---
+title: "AnnualReport_Snails_2022_Analysis"
+author: "Randle"
+date: "10/27/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Front Matter: This script is to summarize and graph results from the crops US data from 2022.
+
+libraries
+```{r}
+library(dismo)
+library(sp)
+library(raster)
+library(stats)
+library(dplyr)
+library(knitr)
+library(rgeos)
+library(maptools)
+library(rgdal)
+library(ecospat)
+library(usdm)
+library(mgcv)
+library(sf)
+```
+# Evaluation
+I want to create a csv that includes all of the data in the individual csv evaluation files. First, lets bring all of them in as a list
+```{r}
+eval_files = list.files(pattern="*eval.csv")
+eval = lapply(eval_files, read.csv)
+#and lets name the list elements
+names<-c("Arion_lusitanicus", "Arion_subfuscus", "Arion_vulgaris", "Belocaulis_angustipes", "Cernuella_neglecta", "Cochlicella_acuta", "Eobania_vermiculata", "Hygromia_cinctella", "Laevicaulis_alte", "Lissachatina_fulica", "Monacha_cantiana", "Monacha_cartusiana", "Ovachlamys_fulgens", "Paramarion_martensi", "Prietocella_barbara", "Sarasinula_plebeia", "Tandonia_budapestensis", "Tandonia_sowerbyi", "Theba_pisana", "Xerolenta_obvia", "Xeropicta_derbentina", "Xerotricha_conspurcata")
+names(eval)<-names
+#Eval is now a list of matrices each containing five columns (X, gam, brt, maxent, and ensemble) and four rows (AUC, COR, kappa, TSS) the abd now I want to extract a vector of values from each element of the list. This makes rows from each, with each element corresponding to AUC, COR, kappa, and TSS)
+auc<-sapply(eval,"[",2)
+cor<-sapply(eval,"[",3)
+kappa<-sapply(eval,'[',4)
+tss<-sapply(eval,'[',5)
+names(auc)<-names
+names(cor)<-names
+names(kappa)<-names
+names(tss)<-names
+```
+Let's take the list and collapse it into a table and write it as a csv
+```{r}
+eval_matrix<-list()
+for (i in 1:22){
+  sp_eval<-c(auc[[i]], cor[[i]],kappa[[i]], tss[[i]])
+  eval_matrix[[length(eval_matrix)+1]]<-sp_eval
+}
+names(eval_matrix)<-names
+eval_matrix_df<-as.data.frame(do.call(rbind,eval_matrix))
+colnames(eval_matrix_df)<-replicate(4,c("auc","cor","kappa","tss"))
+rownames(eval_matrix_df)<-names
+write.csv(eval_matrix_df, file='eval_matrix.csv')
+```
+
+# Generate threat matrix
+I need to crop each map to the size of the US, and then find the average habitat suitability.
+```{r}
+#I received a zipped shape file from Kayla Hankins who rocks
+usa<-readOGR(dsn='/Users/shsu/RTemps/Lower48_Dissolved_Boundary', layer='Lower48_Dissolved_Boundary')
+plot(usa)
+```
+OK...let's make sure that the crs is the same as our geotifs
+```{r}
+crs(usa)
+```
+...and grab data from its extent
+```{r}
+extent<-extent(usa)
+xmin<-extent@xmin
+xmax<-extent@xmax
+ymin<-extent@ymin
+ymax<-extent@ymax
+```
+
+
+Hell yes.  Now let's gather all of our ensemble tifs. B
+```{r}
+ens_files<-list.files(pattern="*ENS.tif")
+all_rasters<-list()
+for (i in 1:length(ens_files)){
+  raster<-raster(ens_files[i])
+  all_rasters[[length(all_rasters)+1]]<-raster
+}
+names(all_rasters)<-names
+crs(all_rasters[[16]])
+```
+And let's go ahead and crop and mask these rasters
+```{r}
+all_rasters_us<-lapply(all_rasters, crop, extent(usa))
+#and mask
+all_rasters_us<-lapply(all_rasters_us, mask, usa)
+#and just to be sure, let's plot one
+cool<-colorRampPalette(c('gray','green','dark green',"blue"))
+states<-readOGR(dsn='/Users/shsu/RTemps/Lower48_StateBoundaries', layer='Lower48_Boundaries')
+plot(all_rasters_us[[4]], col=cool(100), zlim=c(0,1))
+plot(states,add=TRUE)
+```
+
+OK...so now I just need to generate a vector of threat index (TI), which is just the mean value of each raster
+
+```{r}
+raw_means<-lapply(all_rasters_us, cellStats, stat='mean', na.rm=TRUE)
+raw_means<-unlist(raw_means)
+TI<-cbind(names,raw_means)
+write.csv(TI,file='Mollusc_threat_index2022.csv')
+```
+
+
+The top 5 pest are *Xerolenta obvia*, *Arion subfuscus*, *Hygromia cinctella*, *Monacha cartusiana*, and *Xerotricha_conspurcata*.
+Kayla has kindly already generated beautiful plots.
+
+
+# Average threat map
+```{r}
+#so let's review the auc list and make sure its all numeric. For some reason or other, the Eobania vermiculata data are character rather than numeric.  Let's fix this.
+
+#let's get a vector auc for each of the ensembles
+ens_auc<-lapply(auc, '[[', 4)
+#and use these to weight the rasters by their auc
+weighted_rasters<-list()
+for (i in 1:length(all_rasters_us)){
+  weighted_raster<-all_rasters_us[[i]]*auc[[i]]
+  weighted_rasters[[length(weighted_rasters)+1]]<-weighted_raster
+}
+#and we'll need the sum of auc
+auc_vector<-unlist(ens_auc)
+sum_auc<-sum(auc_vector)
+#and add all the raster layers together by first creating a raster layer the same size as the rasters in the list
+x<-raster(ncol=ncol(all_rasters_us[[1]]), nrow=nrow(all_rasters_us[[1]]))
+#and with the same extent and crs
+extent(x)<-extent(all_rasters_us[[1]])
+crs(x)<-crs(all_rasters_us[[1]])
+#and setting all values = 0
+values(x)<-0
+#giddyup
+for (i in 1:length(all_rasters_us)){
+  raster<-all_rasters_us[[i]]
+  x<-raster+x
+}
+plot(x)
+```
+OK...that works. Now let's divide by the AUC and plot.
+```{r}
+average_suitability<-x/sum_auc
+writeRaster(average_suitability,'Snails_average_suitability.tif', overwrite=TRUE)
+plot(average_suitability, col=cool(100))
+plot(states,add=TRUE)
+```
+
+#World threat map
+Last...I want to make a figure including the worldwide predictions and I want to add to it points from each of the snails.
+```{r}
+#Let's go ahead and make a world threat map
+#and use these to weight the rasters by their auc
+weighted_rasters2<-list()
+for (i in 1:length(all_rasters)){
+  weighted_raster2<-all_rasters[[i]]*ens_auc[[i]]
+  weighted_rasters2[[length(weighted_rasters2)+1]]<-weighted_raster2
+}
+#and add them together
+#and add all the raster layers together by first creating a raster layer the same size as the rasters in the list
+x2<-raster(ncol=ncol(all_rasters[[1]]), nrow=nrow(all_rasters[[1]]))
+#and with the same extent and crs
+extent(x2)<-extent(all_rasters[[1]])
+crs(x2)<-crs(all_rasters[[1]])
+#and setting all values = 0
+values(x2)<-0
+#giddyup
+for (i in 1:length(all_rasters)){
+  raster<-all_rasters[[i]]
+  x2<-raster+x2
+}
+world_average<-x2/sum_auc
+data(wrld_simpl)
+black<-colorRampPalette(c('light gray','dark gray','blue','dark blue', 'black'))
+plot(world_average, col=black(100))
+plot(wrld_simpl, add=TRUE)
+```
+
+
+And let's go ahead and get all of the csv files. I don't know how to do this with lists and I'm running out of time.
+```{r}
+Arion_lusitanicus<-read.csv(file='Arion_lusitanicus_qGIS_clean.csv')
+Arion_subfuscus<-read.csv(file='Arion_subfuscus_qGIS_clean.csv')
+Arion_vulgaris<-read.csv(file='Arion_vulgaris_qGIS_clean.csv')
+Belocaulus_angustipes<-read.csv(file='Belocaulus_angustipes_qGIS_clean.csv')
+Cernuella_neglecta<-read.csv(file='Cernuella_neglecta_qGIS_clean.csv')
+Cochlicella_acuta<-read.csv(file='Cochlicella_acuta_qGIS_clean.csv')
+Eobania_vermiculata<-read.csv(file='Eobania_vermiculata_qGIS_clean.csv')
+Hygromia_cinctella<-read.csv(file='Hygromia_cinctella_qGIS_clean.csv')
+Laevicaulis_alte<-read.csv(file='Laevicaulis_alte_qGIS_clean.csv')
+Lissachatina_fulica<-read.csv(file='Lissachatina_fulica_qGIS_clean.csv')
+Monacha_cantiana<-read.csv(file='Monacha_cantiana_qGIS_clean.csv')
+Monacha_cartusiana<-read.csv(file='Monacha_cartusiana_qGIS_clean.csv')
+Ovachlamys_fulgens<-read.csv(file='Ovachlamys_fulgens_qGIS_clean.csv')
+Parmarion_martensi<-read.csv(file='Parmarion_martensi_qGIS_clean.csv')
+Prietocella_barbara<-read.csv(file='Prietocella_barbara_qGIS_clean.csv')
+Sarasinula_plebeia<-read.csv(file='Sarasinula_plebeia_qGIS_clean.csv')
+Tandonia_budapestensis<-read.csv(file='Tandonia_budapestensis_qGIS_clean.csv')
+Tandonia_sowerbyi<-read.csv(file='Tandonia_sowerbyi_qGIS_clean.csv')
+Theba_pisana<-read.csv(file='Theba_pisana_qGIS_clean.csv')
+Xerolenta_obvia<-read.csv(file='Xerolenta_obvia_qGIS_clean.csv')
+Xeropicta_derbentina<-read.csv(file='Xeropicta_derbentina_qGIS_clean.csv')
+Xerotricha_conspurcata<-read.csv(file='Xerotricha_conspurcata_qGIS_clean.csv')
+```
+And make a plot
+```{r}
+plot(world_average, col=black(100))
+points(Arion_lusitanicus$lon, Arion_lusitanicus$lat , pch=9, cex=0.2, col='cyan')
+points(Arion_subfuscus$lon, Arion_subfuscus$lat , pch=9, cex=0.2, col='brown1')
+points(Arion_vulgaris$lon, Arion_vulgaris$lat , pch=9, cex=0.2, col='deeppink')
+points(Belocaulus_angustipes$lon, Belocaulus_angustipes$lat , pch=9, cex=0.2, col='gold')
+points(Cernuella_neglecta$lon, Cernuella_neglecta$lat , pch=9, cex=0.2, col='tan1')
+points(Cochlicella_acuta$lon, Cochlicella_acuta$lat , pch=9, cex=0.2, col='violet')
+points(Eobania_vermiculata$lon, Eobania_vermiculata$lat , pch=9, cex=0.2, col='yellow')
+points(Hygromia_cinctella$lon, Hygromia_cinctella$lat , pch=9, cex=0.2, col='mediumspringgreen')
+points(Laevicaulis_alte$lon, Laevicaulis_alte$lat , pch=9, cex=0.2, col='darkolivegreen')
+points(Lissachatina_fulica$lon, Lissachatina_fulica$lat , pch=9, cex=0.2, col='chartreuse')
+points(Monacha_cantiana$lon, Monacha_cantiana$lat , pch=9, cex=0.2, col='lightblue')
+points(Monacha_cartusiana$lon, Monacha_cartusiana$lat , pch=9, cex=0.2, col='white')
+points(Ovachlamys_fulgens$lon, Ovachlamys_fulgens$lat , pch=9, cex=0.2, col='turquoise1')
+points(Parmarion_martensi$lon, Parmarion_martensi$lat , pch=9, cex=0.2, col='orange')
+points(Prietocella_barbara$lon, Prietocella_barbara$lat , pch=9, cex=0.2, col='cadetblue2')
+points(Sarasinula_plebeia$lon, Sarasinula_plebeia$lat , pch=9, cex=0.2, col='aquamarine')
+points(Tandonia_budapestensis$lon, Tandonia_budapestensis$lat , pch=9, cex=0.2, col='coral')
+points(Tandonia_sowerbyi$lon, Tandonia_sowerbyi$lat , pch=9, cex=0.2, col='chartreuse4')
+points(Theba_pisana$lon, Theba_pisana$lat , pch=9, cex=0.2, col='brown2')
+points(Xerolenta_obvia$lon, Xerolenta_obvia$lat , pch=9, cex=0.2, col='cyan')
+points(Xeropicta_derbentina$lon, Xeropicta_derbentina$lat , pch=9, cex=0.2, col='brown1')
+points(Xerotricha_conspurcata$lon, Xerotricha_conspurcata$lat , pch=9, cex=0.2, col='deeppink')
+```

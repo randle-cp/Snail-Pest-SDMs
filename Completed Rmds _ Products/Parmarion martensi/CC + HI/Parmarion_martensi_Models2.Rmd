@@ -1,0 +1,419 @@
+---
+title: "Parmarion martensi"
+author: "K. Hankins"
+date: "1/8/2022"
+output: html_document
+---
+
+
+## Front Matter
+The following script was developed cooperatively by the SHSU SDM working group, including Laura	Bianchi, Austin	Brenek, Jesus	Castillo, Nick 	Galle, Kayla	Hankins, Kenneth	Nobleza, Chris	Randle, Nico	Reger, Alyssa	Russell, Ava	Stendahl based on [tutorials](https://rspatial.org/) provided by Robert Hijmans and Jane Elith. Chris Randle composed the following script from many scripts developed by the SHSU SDM working group.
+
+*This works best if your environment is empty at the start.*
+
+I have tried to set this up to eliminate required changes to the code. When you see text in **BOLD** below, that will be an indication that you need to make a decision.
+
+# Libraries
+```{r Load-libraries}
+library(dismo)
+library(sp)
+library(raster)
+library(stats)
+library(dplyr)
+library(knitr)
+library(rgeos)
+library(maptools)
+library(rgdal)
+library(ecospat)
+library(usdm)
+library(mgcv)
+setwd("~/School/Thesis/Snail_Data")
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Genus and Species strings
+Their are many places in this code where you will need to save files with filenames including the genus and species. We'll save these as strings to automate the creation of file names. Enter your genus name and specific epithet in the quotes below.
+```{r}
+genus<-"Parmarion"
+species<-"martensi"
+```
+
+
+## Occurrence Data
+Import occurrence data from csv file already generated (2020-2021), or using the script "Occurrence_Data.rmd" and visualize it.
+```{r}
+sdmdata<-read.csv(file='C:/Users/kscih/OneDrive/Documents/School/Thesis/Snail_Data/Parmarion_martensi_qGIS_clean_Grp1.csv')
+##and visualize the data
+#first lets get the extent of the data (the coordinates of the smallest box needed to encapsulate the data)  To do this I first need to convert sdmdata into a spatial points dataframe with the same crs as "wrldsmpl", a giant spatial polygons data frame available from maptools
+sdmdataframe<-data.frame(sdmdata)
+data(wrld_simpl)
+coordinates(sdmdataframe) <- ~lon+lat
+crs(sdmdataframe) <- crs(wrld_simpl)
+#And then extract the extent
+e<-extent(sdmdataframe)
+xmin<-xmin(e)
+xmax<-xmax(e)
+ymin<-ymin(e)
+ymax<-ymax(e)
+# and then plot a map and add the points from sdmdata
+plot(wrld_simpl, xlim=c(xmin,xmax), ylim=c(ymin,ymax), axes=TRUE, col="light yellow")
+box()
+points(sdmdata$lon, sdmdata$lat, col='red', cex=0.75)
+```
+
+Let's divide the data into training and testing data sets.
+The following code divides the data set into 80% training and 20% testing.
+```{r B2.Training_testing}
+#let's make sdmdata into a dataframe
+data(wrld_simpl)
+coordinates(sdmdata) <- ~lon+lat
+crs(sdmdata) <- crs(wrld_simpl)
+
+#let's extract just the coordinates
+presence <- coordinates(sdmdata)
+#First we'll make a random list of integers from 1-5 as long as our presence data. Setting the seed results in a repeatable random process
+set.seed(0)
+#now make a list as long as the number of rows in presence consisting of a random series of integers from 1-5
+group <- kfold(presence, 5)
+#Then we want to use this to retrieve the number of the rows in the presence data that are associated with the number 1 in our group index.
+test_indices <- as.integer(row.names(presence[group == 1, ]))
+#and create a new list of coordinates including only those rows that are NOT in test indices. These are all the row numbers NOT corresponding with the test_indices (which is ~80% of the data).
+pres_train <- presence[-test_indices,]
+#and those that do correspond with test indices (20%) of the data
+pres_test <- presence[group ==1,]
+```
+
+Save pres_data and test_data as csv files just in case.
+```{r}
+#first presdata_train
+outdata<-data.frame(pres_train)
+colnames(outdata)<-c("lon","lat")
+write.csv(outdata, file=paste0(genus,"_",species,"_train2.csv"), row.names=FALSE)
+
+#and then presdata_test
+outdata<-data.frame(pres_test)
+colnames(outdata)<-c("lon","lat")
+write.csv(outdata, file=paste0(genus,"_",species,"_test2.csv"), row.names=FALSE)
+```
+
+
+## Predictor data
+Let's get the giant predictor file, name the bands, and generate our raster color schemes. This predictor set consists of all 35 Climond layers and elevation.  Get it from Randle and keep it in your directory.
+```{r}
+predictors<-stack('C:/Users/kscih/OneDrive/Documents/School/Thesis/Snail_Data/Climond_Elev_HI.tif')
+bands<-c('Ann_Mean_Temp',	'Mean_Diurnal_Temp_Range',	'Isothermality',	'Temp_Seasonality',	'MaxTemp_WarmestWeek',	'MinTemp_ColdestWeek',	'Temp_Ann_Range',	'MeanTemp_WettestQ',	'MeanTemp_DriestQ',	'MeanTemp_WarmestQ',	'MeanTemp_ColdestQ',	'Ann_Precip',	'Precip_DriestWk',	'Precip_WettestWk',	'Precip_Seasonality',	'Precip_WettestQ',	'Precip_DriestQ',	'Precip_WarmestQ',	'Precip_ColdestQ',	'Ann_Mean_Rad',	'Highest_Weekly_Rad', 'Lowest_Weekly_Rad',	'Lowest_Weekly_Seasonality',	'Rad_WettestQ',	'Rad_DriestQ',	'Rad_WarmestQ',	'Rad_ColdestQ',	'Ann_Mean_Moisture',	'Highest_Weekly_Moisture',	'Lowest_Weekly_Moisture',	'Moisture_Seasonality',	'MeanMoisture_WettestQ',	'MeanMoisture_DriestQ',	'MeanMoisture_WarmestQ',	'MeanMoisture_ColdestQ', 'Elev', 'Human_Impact')
+names(predictors)<-bands
+cool<-colorRampPalette(c('gray','green','dark green',"blue"))
+warm<-colorRampPalette(c('yellow', 'orange', 'red', 'brown', 'black'))
+plot(predictors[["Ann_Mean_Temp"]], col=warm(100))
+```
+And now we will use the VIFstep function to identify layers contributing most to collinearity (variance inflation factor). Rather than do this from a raster, I think it makes much more sense to do this from a dataframe in which we have sampled all the layers at the presence points only. This is because the larger a species distribution is, the lower the probability of collinearity across the range, even if layers are collinear where the species actually exists in the range.
+```{r}
+#extract environmental data using the points in sdmdata
+env_data<-extract(predictors,sdmdata)
+#give names to the columns
+colnames(env_data)<-bands
+#run the vif
+vif<-vifstep(env_data)
+#and let's find the layers that were excluded and drop them
+excluded<-vif@excluded
+predictors<-dropLayer(predictors,excluded)
+#and let's just go ahead and see which layers were dropped.
+NClayers<-names(predictors)
+NClayers
+```
+## General additive model
+# Data preparation
+Generally speaking, we want to sample absence data from the region in which the presence data occur. There are two ways to do that, and one of them is better than the other. The first is to sample randomly.  That may seem like a good idea, but its counter-intuitively not. The reason is that the presence data likely includes sampling bias. This will be inherent in p(hypothesis). If we include the same sampling bias in p(data), they cancel out in Bayes Theorem. The way that we'll do that is to create circles around our data and sample absence points from within those. The circles will have a diameter equal to the average distance between points.
+
+```{r}
+#convert presence training data into a spatial points dataframe.
+pres_train_SPDF<-SpatialPoints(pres_train)
+crs(pres_train_SPDF) <- crs(wrld_simpl)
+#Let's get the average distance between points (great circle distance--takes into account the curvature of the earth). spDists creates a matrix of distances between points. This includes zeros. 
+dist<-spDists(pres_train_SPDF,longlat = TRUE)
+#replace the zeros with NA
+dist[dist == 0]<-NA
+#and calculate the mean--this is the average distance between points...the result will be in kilometers, but we need to convert it to meters so we multiply by 1000
+dist<-1000*mean(dist, na.rm=TRUE)
+#now we are going to make circles using the average distance between points as the diameter. 
+x <- circles(pres_train_SPDF, d=dist, lonlat=TRUE)
+#and convert those into polygons
+pol <- polygons(x)
+plot(wrld_simpl, xlim=c(xmin,xmax), ylim=c(ymin,ymax), axes=TRUE, col="light yellow")
+box()
+points(sdmdata$lon, sdmdata$lat, col='red', cex=0.75)
+plot(pol, add=TRUE)
+#and draw a number of samples from that approximately three times the number of presence points. We'll chop that down at the end.
+samp1 <- spsample(pol, nrow(pres_train)*4, type='random', iter=25)
+#and get the cell numbers from the raster stack (right to left, up to down)
+cells <- cellFromXY(predictors, samp1)
+#and transform each of those to the center of its cell.
+abs_train <- xyFromCell(predictors, cells)
+#You'll get a warning saying that your CRS object has lost a comment. This is unimportant and can be ignored.
+```
+And let's go ahead and extract the presence data, remove rows with NA values, and add a column of 1s.
+```{r}
+pres_train_data<-extract(predictors,pres_train)
+complete<-complete.cases(pres_train_data)
+pres_train_data<-pres_train_data[complete,]
+pres_train_data<-cbind(pres_train_data,1)
+```
+
+
+Now we want to extract predictors for the absence data, remove rows with NA values and chop it down to the size of our presence training data, and combine these into one data frame with column names (pa is the last column of 0,1 which indicates presence or absence)
+```{r}
+abs_train_data<-extract(predictors,abs_train)
+#remove rows with NA values
+complete<-complete.cases(abs_train_data)
+abs_train_data<-abs_train_data[complete,]
+#and select a number of rows equal to the presence training data
+abs_train_data<-abs_train_data[1:nrow(pres_train_data),]
+#and add a column of zeros to the end.
+abs_train_data<-cbind(abs_train_data,0)
+#put the two matrices together and name the colmns
+train_data<-rbind(pres_train_data,abs_train_data)
+colnames(train_data)<-c(names(predictors),"pa")
+train_data<-as.data.frame(train_data)
+```
+
+# Training the GAM and making predictions. 
+**This is a pain in the neck because all of the layers have to be specified. I recommend printing the column names in the console `colnames(train_data)` and then copying them and formatting them**
+```{r}
+colnames(train_data)
+gam <- gam(pa ~ Mean_Diurnal_Temp_Range + Temp_Ann_Range + MeanTemp_WettestQ + Ann_Precip + Precip_DriestWk + Precip_ColdestQ + Highest_Weekly_Rad + Lowest_Weekly_Rad + Rad_WarmestQ + MeanMoisture_WarmestQ + Elev + Human_Impact,
+family = binomial(link = "logit"), data=train_data)
+summary(gam)
+```
+Let's make some predictions and export them to a file
+```{r}
+GAMpreds <- predict(predictors, gam, type = 'response')
+writeRaster(GAMpreds, filename = paste0(genus,"_",species,"_GAM2.tif"), overwrite=TRUE)
+plot(GAMpreds, main=c(genus,species,'GAM/Binary'),col=warm(100), zlim=c(0,1))
+points(pres_test, col='white', cex =.4, pch=3)
+```
+
+## MaxEnt
+We need many more background points for MaxEnt and BRT than we needed for GAM. Let's go ahead and generate those.
+```{r}
+samp1 <- spsample(pol, 10000, type='random', iter=25)
+#and get the cell numbers from the raster stack (right to left, up to down)
+cells <- cellFromXY(predictors, samp1)
+#and transform each of those to the center of its cell.
+background_train <- xyFromCell(predictors, cells)
+#You'll get a warning saying that your CRS object has lost a comment. This is unimportant and can be ignored.
+
+#If the background data has too many NA values, first get the predictor data associated with the points
+background_train_data<-extract(predictors,background_train)
+#and remove all of the points that don't have data
+complete<-complete.cases(background_train_data)
+background_train<-background_train[complete,]
+```
+Let's go ahead and set a locations for java
+**This will obviously be specialized for your computer. Try to find the 'home' folder in java and specify the path below**
+```{r}
+#Sys.setenv(JAVA_HOME='')
+```
+First we let the program know to start up maxent using the command maxent. After that, all we need to do is to make a model oject (me_model), from the raster data and the presence training data.
+```{r}
+library(rJava)
+maxent()
+me_model <- maxent(predictors, pres_train, a=background_train)
+#and plot the models most important layers
+par(mfrow=c(1,1))
+plot(me_model)
+```
+Let's go ahead and make some predictions
+```{r}
+MEpreds<-predict(predictors, me_model, type='response')
+writeRaster(MEpreds, filename=paste0(genus,"_",species,"_ME2.tif"), overwrite=TRUE)
+#and plot
+plot(MEpreds, col=warm(100), zlim=c(0,1))
+```
+
+## Boosted regression trees
+We need to prepare data for BRT in much the same way that we did for GAM, with the exception that we will need a lot more background data.  We can use the 10,000 points that we already generated for ME
+```{r}
+#let's get the data from our predictors
+bg_train_data<-extract(predictors,background_train)
+#and bind a column of 0 to the end of it
+bg_train_data<-cbind(bg_train_data,0)
+#and convert it to a data frame
+bg_train_data<-as.data.frame(bg_train_data)
+#and then combine it withe the presence training data
+pres_train_data<-as.data.frame(pres_train_data)
+BRT_data<-rbind(pres_train_data, bg_train_data)
+colnames(BRT_data)<-c(names(predictors),"pa")
+```
+
+```{r}
+sdm.tc5.lr001 <- gbm.step(data=BRT_data, gbm.x = 1:nlayers(predictors), gbm.y = ncol(BRT_data), family = "bernoulli", tree.complexity = 5, learning.rate = 0.001, bag.fraction = 0.5)
+summary(sdm.tc5.lr001)
+```
+
+**Note: you may want to try different combinations!  If your trees are converging too slowly, raise the tree complexity by 1 or two, and back the learning rate down.  On the other hand of your holdout deviance drops very quickly and slowly starts to rise, you are overfitting. Drop the tree complexity and raise the learning rate.**
+
+Let's make predictions and save them
+```{r}
+BRTpreds<-predict(predictors, sdm.tc5.lr001, type='response')
+writeRaster(BRTpreds, filename=paste0(genus,"_", species,"_BRT2.tif"), overwrite=TRUE)
+#and plot
+plot(BRTpreds, col=warm(100), zlim=c(0,1))
+```
+
+## Evaluation
+We want to generate the following metrics for each of the three models: AUC, COR, maximum Kappa, TRS, and it wouldn't kill us to have a Boyce graph either.
+
+#Absence Testing Data
+First we'll use the pres_test data to generate absence test data. This time we want about the same number of points for both. To do that, we'll generate 4x the number of absence points as presence points and chop it to size.
+```{r}
+pres_test_SPDF<-SpatialPoints(pres_test)
+data("wrld_simpl")
+crs(pres_test_SPDF) <- crs(wrld_simpl)
+#now we are going to make circles of about a degree (110000 meters at the equator). I'm working in a relatively small area, but if your data are widespread, you can increase this by changing d.
+x <- circles(pres_test_SPDF, d=dist, lonlat=TRUE)
+#and convert those into polygons
+pol <- polygons(x)
+#and draw a number of samples from that...because 
+samp1 <- spsample(pol, 4*length(pres_test), type='random', iter=25)
+#and get the cell numbers from the raster stack (right to left, up to down)
+cells <- cellFromXY(predictors, samp1)
+#and transform each of those to the center of its cell.
+abs_test <- xyFromCell(predictors, cells)
+#You'll get a warning saying that your CRS object has lost a comment. This is unimportant and can be ignored.
+```
+
+GAM evaluation
+```{r}
+p<-extract(GAMpreds,pres_test)
+a<-extract(GAMpreds,abs_test)
+#And let's get rid of nasty NA values and shrink a to the size of p
+p<-p[!is.na(p)]
+a<-a[!is.na(a)]
+a<-a[1:length(p)]
+#Let's look at the shape of these data
+#lets weld all the data together
+all_vals<-c(p,a)
+e<-evaluate(p=p,a=a)
+AUC_GAM<-e@auc
+COR_GAM<-e@cor
+pa<-c(replicate(length(p),1),replicate(length(a),0))
+kappaGAM<-ecospat.max.kappa(all_vals,pa)
+TSS_GAM<-ecospat.max.tss(all_vals,pa)
+print(paste('Max kappa: ', kappaGAM[2] ))
+print(paste('TSS:', TSS_GAM[[2]]))
+e
+```
+And let's go ahead and estimate the Boyce Index
+```{r}
+ecospat.boyce(fit=GAMpreds,pres_test,nclass=0,PEplot = TRUE)
+```
+
+ME Evaluation
+
+```{r}
+p<-extract(MEpreds,pres_test)
+a<-extract(MEpreds,abs_test)
+#And let's get rid of nasty NA values and shrink a to the size of p
+p<-p[!is.na(p)]
+a<-a[!is.na(a)]
+a<-a[1:length(p)]
+#Let's look at the shape of these data
+#lets weld all the data together
+all_vals<-c(p,a)
+e<-evaluate(p=p,a=a)
+AUC_ME<-e@auc
+COR_ME<-e@cor
+pa<-c(replicate(length(p),1),replicate(length(a),0))
+kappaME<-ecospat.max.kappa(all_vals,pa)
+TSS_ME<-ecospat.max.tss(all_vals,pa)
+print(paste('Max kappa: ', kappaME[2] ))
+print(paste('TSS:', TSS_ME[[2]]))
+e
+```
+
+And let's go ahead and estimate the Boyce Index
+```{r}
+ecospat.boyce(fit=MEpreds,pres_test,nclass=0,PEplot = TRUE)
+```
+
+BRT Evaluation
+
+```{r}
+p<-extract(BRTpreds,pres_test)
+a<-extract(BRTpreds,abs_test)
+#And let's get rid of nasty NA values and shrink a to the size of p
+p<-p[!is.na(p)]
+a<-a[!is.na(a)]
+a<-a[1:length(p)]
+#Let's look at the shape of these data
+#lets weld all the data together
+all_vals<-c(p,a)
+e<-evaluate(p=p,a=a)
+AUC_BRT<-e@auc
+COR_BRT<-e@cor
+pa<-c(replicate(length(p),1),replicate(length(a),0))
+kappaBRT<-ecospat.max.kappa(all_vals,pa)
+TSS_BRT<-ecospat.max.tss(all_vals,pa)
+print(paste('Max kappa: ', kappaBRT[2] ))
+print(paste('TSS:', TSS_BRT[[2]]))
+e
+```
+
+And let's go ahead and estimate the Boyce Index
+```{r}
+ecospat.boyce(fit=BRTpreds,pres_test,nclass=0,PEplot = TRUE)
+```
+
+# Making the ensemble and evaluation
+
+The ensemble is simply the average of GAM, ME, and BRT predictions weighted by AUC.
+```{r}
+ENSpreds<-(GAMpreds*AUC_GAM+MEpreds*AUC_ME+BRTpreds*AUC_BRT)/(AUC_GAM+AUC_ME+AUC_BRT)
+writeRaster(ENSpreds, filename=paste0(genus,"_",species,"_ENS2.tif"), overwrite=TRUE)
+plot(ENSpreds, col=warm(100), zlim=c(0,1))
+```
+And let's evaluate
+```{r}
+p<-extract(ENSpreds,pres_test)
+a<-extract(ENSpreds,abs_test)
+#And let's get rid of nasty NA values and shrink a to the size of p
+p<-p[!is.na(p)]
+a<-a[!is.na(a)]
+a<-a[1:length(p)]
+#Let's look at the shape of these data
+#lets weld all the data together
+all_vals<-c(p,a)
+e<-evaluate(p=p,a=a)
+AUC_ENS<-e@auc
+COR_ENS<-e@cor
+pa<-c(replicate(length(p),1),replicate(length(a),0))
+kappaENS<-ecospat.max.kappa(all_vals,pa)
+TSS_ENS<-ecospat.max.tss(all_vals,pa)
+print(paste('Max kappa: ', kappaENS[2] ))
+print(paste('TSS:', TSS_ENS[[2]]))
+e
+```
+and the Boyce ploy for the ensemble
+```{r}
+ecospat.boyce(fit=ENSpreds,pres_test,nclass=0,PEplot = TRUE)
+```
+
+
+and finally let's make a table of evaluation metrics
+```{r}
+#Let's go in this order of columns, left to right: AUC, COR, Kappa, TSS
+eGAM<-c(AUC_GAM,COR_GAM,kappaGAM[2], TSS_GAM[[2]])
+eME<-c(AUC_ME, COR_ME, kappaME[2],TSS_ME[[2]])
+eBRT<-c(AUC_BRT, COR_BRT, kappaBRT[2],TSS_BRT[[2]])
+eENS<-c(AUC_ENS, COR_ENS, kappaENS[2], TSS_ENS[[2]])
+all_evals<-rbind(eGAM,eME,eBRT,eENS)
+colnames(all_evals)<-c("AUC", "COR","MaxKappa","TSS")
+rownames(all_evals)<-c("GAM","MaxEnt", "BRT", "Ensemble")
+write.csv(all_evals, file=paste0(genus,"_",species, '_eval2.csv'))
+```
+
